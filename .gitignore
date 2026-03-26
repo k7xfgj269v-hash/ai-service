@@ -32,3 +32,8 @@ coverage/
 .idea/
 *.swp
 *.swo
+
+# Runtime data
+data/*.db
+data/vectorstore/
+data/weixin-sync/
