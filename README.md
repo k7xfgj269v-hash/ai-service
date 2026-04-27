@@ -2,6 +2,15 @@
 
 基于 NestJS 的企业微信 AI 客服系统，支持普通应用消息和专区 SDK 两种模式。
 
+## 目录
+
+- [系统架构](#系统架构)
+- [项目结构](#项目结构)
+- [快速开始](#快速开始)
+- [API 接口](#api-接口)
+- [与专区程序的协作](#与专区程序的协作)
+- [技术栈](#技术栈)
+
 ---
 
 ## 系统架构
@@ -14,7 +23,7 @@
             │ 普通应用消息          │ 专区调用
             ↓                      ↓
 ┌───────────────────┐   ┌─────────────────────────────┐
-│   ai-service      │   │  专区程序 (D:\das Programm)  │
+│   ai-service      │   │  专区程序                     │
 │   (本服务器)       │   │  运行在企业微信专区容器内     │
 │                   │   │  端口 8080                   │
 │  端口 3031/3032   │   │  demoloadsdk.py + SDK (.so)  │
@@ -40,7 +49,7 @@
 ## 项目结构
 
 ```
-D:\ai-service/
+ai-service/
 ├── src/
 │   ├── main.ts                                # 主服务入口 (HTTP 3031 / HTTPS 3032)
 │   ├── app.module.ts                          # 应用主模块
@@ -183,7 +192,7 @@ GET    /weixin-knowledge-sync/status               # 同步状态
 DELETE /weixin-knowledge-sync/clear-cache           # 清空缓存
 ```
 
-Swagger 文档: http://localhost:3031/api
+Swagger 文档：启动后访问 `/api` 端点
 
 ---
 
@@ -191,7 +200,7 @@ Swagger 文档: http://localhost:3031/api
 
 ### 专区程序位置
 
-`D:\das Programm\python_demo_src_2.1.1/`
+专区程序目录 `python_demo_src_2.1.1/`
 
 专区程序是独立的 Python 应用，上传到企业微信专区容器运行。它通过 `wwspecapisdk.so` 处理所有 SDK 协议级操作。
 
