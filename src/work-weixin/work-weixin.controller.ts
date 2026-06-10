@@ -1,4 +1,5 @@
 import { Controller, Get, Post, Query, Body, Res, Logger, Req } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { WorkWeixinService } from './work-weixin.service';
 import { Response, Request } from 'express';
 
@@ -6,7 +7,10 @@ import { Response, Request } from 'express';
 export class WorkWeixinController {
   private readonly logger = new Logger(WorkWeixinController.name);
 
-  constructor(private readonly workWeixinService: WorkWeixinService) {}
+  constructor(
+    private readonly workWeixinService: WorkWeixinService,
+    private readonly configService: ConfigService,
+  ) {}
 
   /**
    * 企业微信回调 URL 验证
@@ -96,9 +100,12 @@ export class WorkWeixinController {
         return;
       }
 
-      // 检查是否为测试消息（使用test_signature）
-      if (msgSignature === 'test_signature') {
-        this.logger.log('检测到测试消息，跳过加密验证');
+      // 测试钩子：msg_signature=test_signature 时跳过签名验证与解密，直接处理明文 XML。
+      // 这等于绕过企业微信唯一的鉴权手段，生产环境绝不能开放——默认关闭，
+      // 仅当显式设置 WORK_WEIXIN_ALLOW_TEST=true 时才启用（用于本地联调）。
+      const allowTest = this.configService.get('WORK_WEIXIN_ALLOW_TEST') === 'true';
+      if (msgSignature === 'test_signature' && allowTest) {
+        this.logger.warn('检测到测试消息（WORK_WEIXIN_ALLOW_TEST=true），跳过加密验证');
         
         // 尝试直接解析XML消息
         const xmlMatch = bodyStr.match(/<xml>[\s\S]*<\/xml>/);
