@@ -19,7 +19,7 @@ export class ChatController {
   @Post("clear")
   async clear(@Body() body: { userId?: string }) {
     const userId = body.userId || "web-default";
-    const message = this.aiService.clearHistory(userId);
+    const message = await this.aiService.clearHistory(userId);
     return { message };
   }
 }

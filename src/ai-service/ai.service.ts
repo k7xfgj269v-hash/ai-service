@@ -239,9 +239,12 @@ export class AiService {
             .join('\n')
         : '无历史对话';
 
+    // Use replacement functions, not strings: context/history/query carry
+    // user- and document-supplied text that may contain `$&`, `$\``, `$'` etc.,
+    // which String.replace would interpret as special patterns and corrupt the prompt.
     return template
-      .replace('{context}', context)
-      .replace('{chat_history}', chatHistory)
-      .replace('{question}', userQuery);
+      .replace('{context}', () => context)
+      .replace('{chat_history}', () => chatHistory)
+      .replace('{question}', () => userQuery);
   }
 }
