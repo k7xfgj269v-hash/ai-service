@@ -7,6 +7,7 @@ import {
   UploadedFile,
   UseInterceptors,
   Query,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -44,6 +45,21 @@ export class KnowledgeBaseController {
   })
   @UseInterceptors(
     FileInterceptor('file', {
+      // Reject unsupported types before they touch disk, and cap the size so a
+      // large or bogus upload can't exhaust disk / memory. Only the extensions
+      // loadDocument() actually handles are accepted.
+      limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
+      fileFilter: (req, file, cb) => {
+        const allowed = ['.pdf', '.txt', '.md', '.docx'];
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (!allowed.includes(ext)) {
+          return cb(
+            new BadRequestException(`Unsupported file type: ${ext || '(none)'}. Allowed: ${allowed.join(', ')}`),
+            false,
+          );
+        }
+        cb(null, true);
+      },
       storage: diskStorage({
         destination: (req, file, cb) => {
           const uploadPath = path.join(process.cwd(), 'uploads', 'documents');
@@ -65,6 +81,9 @@ export class KnowledgeBaseController {
     @UploadedFile() file: Express.Multer.File,
     @Body() body: AddDocumentDto,
   ): Promise<AddDocumentResponseDto> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded (field name must be "file")');
+    }
     return await this.knowledgeBaseService.addDocument(
       file.path,
       file.originalname,

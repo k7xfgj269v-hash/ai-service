@@ -371,28 +371,40 @@ export class KnowledgeBaseService {
 
       const topK = config?.topK || 4;
 
-      // 自适应 k：不超过实际 chunk 总数，避免 Faiss 降级警告
+      // 多取再过滤：分类/标签/已删文档的过滤在检索之后做，若按 topK 取就可能被滤空
       const totalChunks = ((this.db.prepare('SELECT SUM(chunkCount) as total FROM documents').get() as any)?.total as number) || 0;
-      const adaptiveK = Math.min(topK, Math.max(1, totalChunks));
+      const fetchK = Math.min(Math.max(topK * 4, topK), Math.max(1, totalChunks));
 
-      const retriever = this.vectorStore.asRetriever({ k: adaptiveK });
-      const relevantDocs = await retriever.invoke(question);
-      this.logger.log(`Retrieved ${relevantDocs.length} relevant documents`);
+      const scored = await this.vectorStore.similaritySearchWithScore(question, fetchK);
+      this.logger.log(`Retrieved ${scored.length} candidates (fetchK=${fetchK})`);
 
-      let filteredDocs = relevantDocs;
-      if (config?.filter) {
-        filteredDocs = relevantDocs.filter(doc => {
-          const filter = config.filter;
-          if (!filter) return true;
-          if (filter.category && doc.metadata.category !== filter.category) return false;
-          if (filter.tags && filter.tags.length > 0 &&
-              !filter.tags.some(tag => doc.metadata.tags?.includes(tag))) return false;
-          return true;
-        });
+      // FAISS 删除向量代价高，removeDocument 只删了元数据；检索时按存活的 documentId 剔除已删块
+      const liveDocIds = new Set<string>(
+        (this.db.prepare('SELECT id FROM documents').all() as Array<{ id: string }>).map(r => r.id),
+      );
+      const relCutoff = parseFloat(this.configService.get('KB_SCORE_RELATIVE_CUTOFF', '1.5'));
+      const selected = KnowledgeBaseService.selectRelevantDocs(scored, {
+        topK,
+        liveDocIds,
+        filter: config?.filter,
+        maxRelativeDistance: Number.isFinite(relCutoff) ? relCutoff : 1.5,
+      });
+      this.logger.log(`Selected ${selected.length}/${scored.length} after filtering & relevance gate`);
+
+      // 命中为空：直接返回，不再浪费一次 LLM 调用去基于空上下文编造
+      if (selected.length === 0) {
+        const processingTime = Date.now() - startTime;
+        const empty: SearchResult = {
+          answer: '抱歉，知识库中没有找到与您问题相关的信息。',
+          sources: [],
+          confidence: 0,
+          processingTime,
+        };
+        return empty;
       }
 
-      const context = filteredDocs
-        .map((doc, index) => `[Document ${index + 1}]\n${doc.pageContent}`)
+      const context = selected
+        .map((doc, index) => `[Document ${index + 1}]\n${doc.content}`)
         .join('\n\n');
 
       const promptTemplate = PromptTemplate.fromTemplate(`
@@ -417,11 +429,12 @@ Requirements:
       const answer = await chain.invoke({ context, question });
 
       const processingTime = Date.now() - startTime;
-      const confidence = this.calculateConfidence(filteredDocs, question);
+      // 用最相似命中的真实距离换算 confidence，而非旧的"文档数×长度"假信号
+      const confidence = KnowledgeBaseService.confidenceFromDistance(selected[0].score);
 
       const result: SearchResult = {
         answer,
-        sources: filteredDocs.map(doc => ({ content: doc.pageContent, metadata: doc.metadata })),
+        sources: selected,
         confidence,
         processingTime,
       };
@@ -441,13 +454,54 @@ Requirements:
   }
 
   /**
-   * Calculate confidence score
+   * 检索后处理（纯函数，便于单测）：剔除已删文档的残留块、按分类/标签过滤、
+   * 用相对距离闸门滤掉明显离群的噪声块，最后取 topK。
+   * scored 为 [doc, distance]，distance 越小越相似（FAISS L2）。
+   * 相对闸门始终保留最相似的命中（dist === best 必然 <= best * cutoff）。
    */
-  private calculateConfidence(docs: Document[], question: string): number {
-    if (docs.length === 0) return 0;
-    const baseConfidence = Math.min(docs.length / 4, 1) * 0.7;
-    const lengthBonus = docs.reduce((sum, doc) => sum + doc.pageContent.length, 0) / (docs.length * 1000) * 0.3;
-    return Math.min(baseConfidence + lengthBonus, 1);
+  static selectRelevantDocs(
+    scored: Array<[Document, number]>,
+    opts: {
+      topK: number;
+      liveDocIds: Set<string>;
+      filter?: { category?: string; tags?: string[] };
+      maxRelativeDistance?: number;
+    },
+  ): Array<{ content: string; metadata: any; score: number }> {
+    const { topK, liveDocIds, filter, maxRelativeDistance = 1.5 } = opts;
+
+    const surviving = [...scored]
+      .sort((a, b) => a[1] - b[1])
+      .filter(([doc]) => {
+        const docId = doc.metadata?.documentId;
+        if (docId && !liveDocIds.has(docId)) return false; // 已删除文档的残留向量
+        if (filter?.category && doc.metadata?.category !== filter.category) return false;
+        if (
+          filter?.tags &&
+          filter.tags.length > 0 &&
+          !filter.tags.some(tag => doc.metadata?.tags?.includes(tag))
+        )
+          return false;
+        return true;
+      });
+
+    if (surviving.length === 0) return [];
+
+    const best = surviving[0][1];
+    const cutoff = best * maxRelativeDistance;
+    return surviving
+      .filter(([, dist]) => dist <= cutoff)
+      .slice(0, topK)
+      .map(([doc, dist]) => ({ content: doc.pageContent, metadata: doc.metadata, score: dist }));
+  }
+
+  /**
+   * 由 FAISS L2 距离换算 0–1 的 confidence（单调递减、有界，距离 0 → 1）。
+   * 这是启发式信号，仅用于相对比较，不是真实概率。
+   */
+  static confidenceFromDistance(distance: number): number {
+    if (!Number.isFinite(distance) || distance < 0) return 0;
+    return 1 / (1 + distance);
   }
 
   /**
