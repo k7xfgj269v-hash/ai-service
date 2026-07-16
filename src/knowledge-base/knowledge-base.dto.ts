@@ -144,6 +144,18 @@ export class RetrieveKnowledgeBaseDto extends RetrievalRequestDto {
   query: string;
 }
 
+export class AnswerKnowledgeBaseDto extends RetrievalRequestDto {
+  @ApiProperty({
+    description: 'Question to answer from knowledge base evidence',
+    maxLength: KNOWLEDGE_BASE_QUERY_MAX_LENGTH,
+  })
+  @Transform(({ value }) => trimString(value))
+  @IsString()
+  @MinLength(1)
+  @MaxLength(KNOWLEDGE_BASE_QUERY_MAX_LENGTH)
+  query: string;
+}
+
 export class ListDocumentsDto {
   @ApiPropertyOptional({
     description: 'Filter by category',
@@ -215,18 +227,52 @@ export class SearchResponseDto {
 }
 
 export class RetrieveResponseDto {
-  @ApiProperty({ description: 'Ranked retrieval evidence' })
-  sources: Array<{
-    content: string;
-    metadata: any;
-    score?: number;
-  }>;
+  @ApiProperty({ description: 'Normalized query' })
+  query: string;
 
-  @ApiProperty({ description: 'Confidence score (0-1)' })
-  confidence: number;
+  @ApiPropertyOptional({ description: 'Active immutable corpus generation' })
+  activeGeneration: string | null;
 
-  @ApiProperty({ description: 'Processing time in milliseconds' })
-  processingTime: number;
+  @ApiProperty({ description: 'Ranked, packed retrieval evidence' })
+  evidence: any[];
+
+  @ApiProperty({ description: 'Packed evidence context' })
+  context: string;
+
+  @ApiProperty({ description: 'Estimated packed context token count' })
+  estimatedTokens: number;
+
+  @ApiProperty({ description: 'Whether retrieval degraded to one backend' })
+  degraded: boolean;
+
+  @ApiProperty({ description: 'Failed retrieval backends', type: [String] })
+  failedRetrievers: string[];
+
+  @ApiProperty({ description: 'Reranker execution status' })
+  rerankerStatus: string;
+
+  @ApiPropertyOptional({ description: 'Reranker fallback reason' })
+  rerankerFallbackReason?: string;
+
+  @ApiProperty({ description: 'Versioned cache diagnostics' })
+  cache: any;
+
+  @ApiProperty({ description: 'Pipeline timings in milliseconds' })
+  timings: any;
+}
+
+export class AnswerResponseDto extends RetrieveResponseDto {
+  @ApiProperty({ description: 'Evidence-grounded answer or abstention text' })
+  answer: string;
+
+  @ApiProperty({ description: 'Validated answer citations' })
+  citations: any[];
+
+  @ApiProperty({ description: 'Whether the evidence gate abstained' })
+  abstained: boolean;
+
+  @ApiProperty({ description: 'Abstention reasons', type: [String] })
+  abstentionReasons: string[];
 }
 
 export class KnowledgeBaseStatsDto {

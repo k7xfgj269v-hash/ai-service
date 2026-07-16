@@ -23,6 +23,8 @@ import { Observable, catchError, throwError } from 'rxjs';
 import {
   AddDocumentDto,
   AddDocumentResponseDto,
+  AnswerKnowledgeBaseDto,
+  AnswerResponseDto,
   DocumentMetadataDto,
   KnowledgeBaseStatsDto,
   ListDocumentsDto,
@@ -35,6 +37,11 @@ import {
   SearchResponseDto,
 } from './knowledge-base.dto';
 import { KnowledgeBaseService } from './knowledge-base.service';
+import {
+  RagAnswerResult,
+  RagQueryService,
+  RagRetrieveResult,
+} from '../rag/rag-query.service';
 
 export const DOCUMENT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
@@ -118,6 +125,7 @@ export class FailedUploadCleanupInterceptor implements NestInterceptor {
 export class KnowledgeBaseController {
   constructor(
     private readonly knowledgeBaseService: KnowledgeBaseService,
+    private readonly ragQueryService: RagQueryService,
   ) {}
 
   @Post('add')
@@ -185,20 +193,35 @@ export class KnowledgeBaseController {
   })
   async retrieve(
     @Body() body: RetrieveKnowledgeBaseDto,
-  ): Promise<RetrieveResponseDto> {
-    const result = await this.knowledgeBaseService.search(body.query, {
-      topK: body.topK,
+  ): Promise<RagRetrieveResult> {
+    return this.ragQueryService.retrieve({
+      query: body.query,
+      limit: body.topK,
       filter: {
         category: body.filterCategory,
         tags: body.filterTags,
       },
     });
+  }
 
-    return {
-      sources: result.sources,
-      confidence: result.confidence,
-      processingTime: result.processingTime,
-    };
+  @Post('answer')
+  @ApiOperation({ summary: 'Answer from validated knowledge base evidence' })
+  @ApiResponse({
+    status: 200,
+    description: 'Answer completed or abstained',
+    type: AnswerResponseDto,
+  })
+  async answer(
+    @Body() body: AnswerKnowledgeBaseDto,
+  ): Promise<RagAnswerResult> {
+    return this.ragQueryService.answer({
+      query: body.query,
+      limit: body.topK,
+      filter: {
+        category: body.filterCategory,
+        tags: body.filterTags,
+      },
+    });
   }
 
   @Get('stats')

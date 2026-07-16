@@ -1,7 +1,10 @@
 import { AiService } from './ai.service';
 import { createConversationRedisOptions } from './ai.module';
-import { ExpertGenerationService } from '../generation/expert-generation.service';
-import { KnowledgeBaseService } from '../knowledge-base/knowledge-base.service';
+import {
+  RagAnswerRequest,
+  RagAnswerResult,
+  RagQueryService,
+} from '../rag/rag-query.service';
 
 type StoredMessage = {
   type: 'human' | 'ai';
@@ -95,19 +98,43 @@ function createRedis(initialHistory?: string) {
   };
 }
 
-function createKnowledgeBase() {
+function createRagAnswer(
+  query: string,
+  answer = 'expert reply',
+): RagAnswerResult {
   return {
-    vectorStore: null,
-    db: {
-      prepare: jest.fn(),
+    query,
+    activeGeneration: null,
+    evidence: [],
+    context: '',
+    estimatedTokens: 0,
+    degraded: false,
+    failedRetrievers: [],
+    rerankerStatus: 'disabled',
+    cache: {
+      retrieval: 'disabled',
+      context: 'disabled',
+      version: 'test',
     },
+    timings: {
+      cacheMs: 0,
+      retrievalMs: 0,
+      contextMs: 0,
+      generationMs: 0,
+      totalMs: 0,
+    },
+    answer,
+    citations: [],
+    abstained: false,
+    abstentionReasons: [],
   };
 }
 
-function createExpert() {
+function createRagQuery() {
   return {
-    isAvailable: jest.fn<boolean, []>(() => true),
-    generate: jest.fn<Promise<string>, [string]>(async (_prompt: string) => 'expert reply'),
+    answer: jest.fn<Promise<RagAnswerResult>, [RagAnswerRequest]>(
+      async request => createRagAnswer(request.query),
+    ),
   };
 }
 
@@ -146,28 +173,27 @@ describe('Conversation Redis configuration', () => {
 
 describe('AiService', () => {
   let redis: ReturnType<typeof createRedis>;
-  let knowledgeBase: ReturnType<typeof createKnowledgeBase>;
-  let expert: ReturnType<typeof createExpert>;
+  let ragQuery: ReturnType<typeof createRagQuery>;
   let service: AiService;
 
   beforeEach(() => {
     redis = createRedis();
-    knowledgeBase = createKnowledgeBase();
-    expert = createExpert();
+    ragQuery = createRagQuery();
     service = new AiService(
-      knowledgeBase as unknown as KnowledgeBaseService,
-      expert as unknown as ExpertGenerationService,
+      ragQuery as unknown as RagQueryService,
       redis.client as any,
     );
   });
 
-  it('uses the Expert generator exactly once for one answerable query', async () => {
+  it('uses the RAG answer pipeline exactly once for one answerable query', async () => {
     await expect(service.processQuery(query('How should I recruit locally?'))).resolves.toBe(
       'expert reply',
     );
 
-    expect(expert.generate).toHaveBeenCalledTimes(1);
-    expect(expert.generate.mock.calls[0][0]).toContain('How should I recruit locally?');
+    expect(ragQuery.answer).toHaveBeenCalledTimes(1);
+    expect(ragQuery.answer.mock.calls[0][0].query).toContain(
+      'How should I recruit locally?',
+    );
   });
 
   it.each(['/normal', '/expert', '进入专家模式', '退出专家模式'])(
@@ -175,20 +201,20 @@ describe('AiService', () => {
     async modeCommand => {
       await expect(service.processQuery(query(modeCommand))).resolves.toBe('expert reply');
 
-      expect(expert.generate).toHaveBeenCalledTimes(1);
-      expect(expert.generate.mock.calls[0][0]).toContain(modeCommand);
+      expect(ragQuery.answer).toHaveBeenCalledTimes(1);
+      expect(ragQuery.answer.mock.calls[0][0].query).toContain(modeCommand);
       expect(redis.client.setex).toHaveBeenCalledTimes(1);
     },
   );
 
-  it('returns the unavailable response without touching history', async () => {
-    expert.isAvailable.mockReturnValue(false);
+  it('returns the fallback response without persisting when the RAG pipeline fails', async () => {
+    ragQuery.answer.mockRejectedValue(new Error('RAG unavailable'));
 
     await expect(service.processQuery(query('question'))).resolves.toBe(
-      '抱歉，AI服务暂时不可用，请稍后再试。',
+      '抱歉，我暂时无法回答您的问题。请稍后再试或联系人工客服。',
     );
-    expect(expert.generate).not.toHaveBeenCalled();
-    expect(redis.client.get).not.toHaveBeenCalled();
+    expect(ragQuery.answer).toHaveBeenCalledTimes(1);
+    expect(redis.client.get).toHaveBeenCalledTimes(1);
     expect(redis.client.setex).not.toHaveBeenCalled();
   });
 
@@ -202,7 +228,7 @@ describe('AiService', () => {
       );
       expect(redis.client.del).toHaveBeenCalledWith('chat:user-1');
       expect(redis.store.has('chat:user-1')).toBe(false);
-      expect(expert.generate).not.toHaveBeenCalled();
+      expect(ragQuery.answer).not.toHaveBeenCalled();
       expect(redis.client.get).not.toHaveBeenCalled();
     },
   );
@@ -213,7 +239,7 @@ describe('AiService', () => {
     redis.client.setex.mockRejectedValue(new Error('redis unavailable'));
 
     await expect(service.processQuery(query('question'))).resolves.toBe('expert reply');
-    expect(expert.generate).toHaveBeenCalledTimes(1);
+    expect(ragQuery.answer).toHaveBeenCalledTimes(1);
     expect(redis.client.get).toHaveBeenCalledTimes(2);
     expect(redis.client.setex).toHaveBeenCalledTimes(1);
   });
@@ -221,14 +247,13 @@ describe('AiService', () => {
   it('ignores malformed history and persists only the valid new exchange', async () => {
     redis = createRedis('{not-json');
     service = new AiService(
-      knowledgeBase as unknown as KnowledgeBaseService,
-      expert as unknown as ExpertGenerationService,
+      ragQuery as unknown as RagQueryService,
       redis.client as any,
     );
 
     await expect(service.processQuery(query('new question'))).resolves.toBe('expert reply');
 
-    expect(expert.generate.mock.calls[0][0]).toContain('无历史对话');
+    expect(ragQuery.answer.mock.calls[0][0].query).toBe('new question');
     const persisted = JSON.parse(redis.client.setex.mock.calls[0][2]) as StoredMessage[];
     expect(persisted).toEqual([
       { type: 'human', content: 'new question' },
@@ -243,8 +268,7 @@ describe('AiService', () => {
     }));
     redis = createRedis(JSON.stringify(oldHistory));
     service = new AiService(
-      knowledgeBase as unknown as KnowledgeBaseService,
-      expert as unknown as ExpertGenerationService,
+      ragQuery as unknown as RagQueryService,
       redis.client as any,
     );
 
@@ -265,32 +289,38 @@ describe('AiService', () => {
     const firstStarted = new Promise<void>(resolve => {
       markFirstStarted = resolve;
     });
-    let resolveFirst: (reply: string) => void;
+    let resolveFirst: (reply: RagAnswerResult) => void;
 
-    expert.generate
-      .mockImplementationOnce(() => {
+    ragQuery.answer
+      .mockImplementationOnce(request => {
         markFirstStarted();
-        return new Promise<string>(resolve => {
+        return new Promise<RagAnswerResult>(resolve => {
           resolveFirst = resolve;
         });
       })
-      .mockResolvedValueOnce('second reply');
+      .mockImplementationOnce(async request =>
+        createRagAnswer(request.query, 'second reply'),
+      );
 
     const first = service.processQuery(query('first question'));
     await firstStarted;
     const second = service.processQuery(query('second question'));
     await Promise.resolve();
 
-    expect(expert.generate).toHaveBeenCalledTimes(1);
+    expect(ragQuery.answer).toHaveBeenCalledTimes(1);
 
-    resolveFirst('first reply');
+    resolveFirst(createRagAnswer('first question', 'first reply'));
     await expect(first).resolves.toBe('first reply');
     await expect(second).resolves.toBe('second reply');
 
-    expect(expert.generate).toHaveBeenCalledTimes(2);
-    expect(expert.generate.mock.calls[1][0]).toContain('用户: first question');
-    expect(expert.generate.mock.calls[1][0]).toContain('助手: first reply');
-    expect(expert.generate.mock.calls[1][0]).toContain('second question');
+    expect(ragQuery.answer).toHaveBeenCalledTimes(2);
+    expect(ragQuery.answer.mock.calls[1][0].query).toContain(
+      '用户：first question',
+    );
+    expect(ragQuery.answer.mock.calls[1][0].query).toContain(
+      '助手：first reply',
+    );
+    expect(ragQuery.answer.mock.calls[1][0].query).toContain('second question');
 
     const persisted = JSON.parse(redis.store.get('chat:user-1')) as StoredMessage[];
     expect(persisted).toEqual([
@@ -303,39 +333,44 @@ describe('AiService', () => {
 
   it('serializes same-user requests across two instances sharing Redis', async () => {
     const secondService = new AiService(
-      knowledgeBase as unknown as KnowledgeBaseService,
-      expert as unknown as ExpertGenerationService,
+      ragQuery as unknown as RagQueryService,
       redis.createClient() as any,
     );
     let markFirstStarted: () => void;
     const firstStarted = new Promise<void>(resolve => {
       markFirstStarted = resolve;
     });
-    let resolveFirst: (reply: string) => void;
+    let resolveFirst: (reply: RagAnswerResult) => void;
 
-    expert.generate
-      .mockImplementationOnce(() => {
+    ragQuery.answer
+      .mockImplementationOnce(request => {
         markFirstStarted();
-        return new Promise<string>(resolve => {
+        return new Promise<RagAnswerResult>(resolve => {
           resolveFirst = resolve;
         });
       })
-      .mockResolvedValueOnce('second reply');
+      .mockImplementationOnce(async request =>
+        createRagAnswer(request.query, 'second reply'),
+      );
 
     const first = service.processQuery(query('first question'));
     await firstStarted;
     const second = secondService.processQuery(query('second question'));
     await redis.waitForContention;
 
-    expect(expert.generate).toHaveBeenCalledTimes(1);
+    expect(ragQuery.answer).toHaveBeenCalledTimes(1);
 
-    resolveFirst('first reply');
+    resolveFirst(createRagAnswer('first question', 'first reply'));
     await expect(first).resolves.toBe('first reply');
     await expect(second).resolves.toBe('second reply');
 
-    expect(expert.generate).toHaveBeenCalledTimes(2);
-    expect(expert.generate.mock.calls[1][0]).toContain('用户: first question');
-    expect(expert.generate.mock.calls[1][0]).toContain('助手: first reply');
+    expect(ragQuery.answer).toHaveBeenCalledTimes(2);
+    expect(ragQuery.answer.mock.calls[1][0].query).toContain(
+      '用户：first question',
+    );
+    expect(ragQuery.answer.mock.calls[1][0].query).toContain(
+      '助手：first reply',
+    );
 
     const persisted = JSON.parse(redis.store.get('chat:user-1')) as StoredMessage[];
     expect(persisted).toEqual([

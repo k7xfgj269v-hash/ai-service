@@ -11,6 +11,7 @@ import * as path from 'path';
 import { firstValueFrom, throwError } from 'rxjs';
 import {
   AddDocumentDto,
+  AnswerKnowledgeBaseDto,
   KNOWLEDGE_BASE_CATEGORY_MAX_LENGTH,
   KNOWLEDGE_BASE_QUERY_MAX_LENGTH,
   KNOWLEDGE_BASE_TAG_MAX_LENGTH,
@@ -27,6 +28,7 @@ import {
   documentUploadOptions,
 } from './knowledge-base.controller';
 import { KnowledgeBaseService } from './knowledge-base.service';
+import { RagQueryService } from '../rag/rag-query.service';
 
 const validationPipe = new ValidationPipe({
   transform: true,
@@ -77,6 +79,10 @@ describe('KnowledgeBaseController', () => {
     clear: jest.Mock;
     rebuild: jest.Mock;
   };
+  let ragQuery: {
+    retrieve: jest.Mock;
+    answer: jest.Mock;
+  };
 
   beforeEach(() => {
     service = {
@@ -88,8 +94,13 @@ describe('KnowledgeBaseController', () => {
       clear: jest.fn(),
       rebuild: jest.fn(),
     };
+    ragQuery = {
+      retrieve: jest.fn(),
+      answer: jest.fn(),
+    };
     controller = new KnowledgeBaseController(
       service as unknown as KnowledgeBaseService,
+      ragQuery as unknown as RagQueryService,
     );
   });
 
@@ -324,24 +335,47 @@ describe('KnowledgeBaseController', () => {
     });
 
     it('returns retrieval evidence without the legacy answer field', async () => {
-      service.search.mockResolvedValue({
-        ...retrievalResult,
-        answer: 'must not escape',
-      });
+      const result = {
+        query: 'policy',
+        evidence: retrievalResult.sources,
+      };
+      ragQuery.retrieve.mockResolvedValue(result);
       const body = await transform(RetrieveKnowledgeBaseDto, {
         query: ' policy ',
         topK: 2,
       });
 
-      await expect(controller.retrieve(body)).resolves.toEqual({
-        sources: retrievalResult.sources,
-        confidence: retrievalResult.confidence,
-        processingTime: retrievalResult.processingTime,
-      });
-      expect(service.search).toHaveBeenCalledWith('policy', {
-        topK: 2,
+      await expect(controller.retrieve(body)).resolves.toBe(result);
+      expect(ragQuery.retrieve).toHaveBeenCalledWith({
+        query: 'policy',
+        limit: 2,
         filter: {
           category: undefined,
+          tags: undefined,
+        },
+      });
+    });
+
+    it('returns a validated RAG answer from the answer endpoint', async () => {
+      const result = {
+        query: 'policy',
+        answer: 'Use the current leave policy.',
+        citations: [{ id: 'source-1' }],
+        abstained: false,
+      };
+      ragQuery.answer.mockResolvedValue(result);
+      const body = await transform(AnswerKnowledgeBaseDto, {
+        query: ' policy ',
+        topK: 2,
+        filterCategory: ' HR ',
+      });
+
+      await expect(controller.answer(body)).resolves.toBe(result);
+      expect(ragQuery.answer).toHaveBeenCalledWith({
+        query: 'policy',
+        limit: 2,
+        filter: {
+          category: 'HR',
           tags: undefined,
         },
       });
