@@ -46,7 +46,7 @@ export class WeixinSyncController {
     description: '自动同步已停止',
   })
   async stopAutoSync(): Promise<{ success: boolean; message: string }> {
-    this.weixinSyncService.stopAutoSync();
+    await this.weixinSyncService.stopAutoSync();
     return {
       success: true,
       message: '企业微信聊天记录自动同步已停止',
@@ -98,7 +98,7 @@ export class WeixinSyncController {
     description: '缓存已清空',
   })
   async clearCache(): Promise<{ success: boolean; message: string }> {
-    this.weixinSyncService.clearCache();
+    await this.weixinSyncService.clearCache();
     return {
       success: true,
       message: '聊天记录缓存已清空',
