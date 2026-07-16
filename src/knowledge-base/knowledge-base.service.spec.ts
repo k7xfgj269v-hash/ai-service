@@ -1,7 +1,22 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { Document } from '@langchain/core/documents';
+import { ChatOpenAI } from '@langchain/openai';
 import { KnowledgeBaseService } from './knowledge-base.service';
+
+jest.mock('@langchain/openai', () => ({
+  OpenAIEmbeddings: jest.fn(),
+  ChatOpenAI: jest.fn(),
+}));
+
+jest.mock('ioredis', () =>
+  jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    get: jest.fn(async () => null),
+    setex: jest.fn(async () => 'OK'),
+    disconnect: jest.fn(),
+  })),
+);
 
 function doc(documentId: string, extra: Record<string, any> = {}): Document {
   return new Document({ pageContent: `content-${documentId}`, metadata: { documentId, ...extra } });
@@ -9,6 +24,7 @@ function doc(documentId: string, extra: Record<string, any> = {}): Document {
 
 describe('KnowledgeBaseService', () => {
   let service: KnowledgeBaseService;
+  const ChatOpenAIMock = ChatOpenAI as unknown as jest.Mock;
 
   const mockConfigService = {
     get: jest.fn((key: string, defaultVal?: any) => {
@@ -28,6 +44,7 @@ describe('KnowledgeBaseService', () => {
   };
 
   beforeEach(async () => {
+    ChatOpenAIMock.mockClear();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         KnowledgeBaseService,
@@ -36,6 +53,11 @@ describe('KnowledgeBaseService', () => {
     }).compile();
 
     service = module.get<KnowledgeBaseService>(KnowledgeBaseService);
+  });
+
+  afterEach(() => {
+    (service as any).redis?.disconnect?.();
+    (service as any).db?.close?.();
   });
 
   it('should be defined', () => {
@@ -56,8 +78,79 @@ describe('KnowledgeBaseService', () => {
     it('should return empty result when vector store is not initialized', async () => {
       const result = await service.search('test query');
       expect(result).toBeDefined();
+      expect(result.answer).toBe('');
       expect(result.sources).toEqual([]);
       expect(result.confidence).toBe(0);
+    });
+
+    it('returns retrieval evidence without creating a second answer generator', async () => {
+      const vectorStore = {
+        similaritySearchWithScore: jest.fn(async () => [
+          [doc('a', { fileName: 'policy.md' }), 0.2],
+        ]),
+      };
+      const redis = {
+        get: jest.fn(async () => null),
+        setex: jest.fn(async (_key: string, _ttl: number, _value: string) => 'OK'),
+      };
+      const db = {
+        prepare: jest.fn((sql: string) => {
+          if (sql.includes('SUM(chunkCount)')) {
+            return { get: () => ({ total: 1 }) };
+          }
+          if (sql.includes('SELECT id FROM documents')) {
+            return { all: () => [{ id: 'a' }] };
+          }
+          throw new Error(`unexpected SQL: ${sql}`);
+        }),
+      };
+      (service as any).vectorStore = vectorStore;
+      (service as any).redis = redis;
+      (service as any).db.close();
+      (service as any).db = db;
+
+      const result = await service.search('policy question', { topK: 1 });
+
+      expect(result.answer).toBe('');
+      expect(result.sources).toEqual([
+        {
+          content: 'content-a',
+          metadata: {
+            documentId: 'a',
+            fileName: 'policy.md',
+          },
+          score: 0.2,
+        },
+      ]);
+      expect(result.confidence).toBeCloseTo(1 / 1.2);
+      expect(ChatOpenAIMock).not.toHaveBeenCalled();
+      expect(redis.setex).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(redis.setex.mock.calls[0][2]).answer).toBe('');
+    });
+
+    it('strips answers from legacy cached retrieval results', async () => {
+      const sources = [{ content: 'cached evidence', metadata: { documentId: 'a' }, score: 0.2 }];
+      (service as any).vectorStore = {};
+      (service as any).redis = {
+        get: jest.fn(async () =>
+          JSON.stringify({
+            answer: 'legacy generated answer',
+            sources,
+            confidence: 0.8,
+            processingTime: 12,
+          }),
+        ),
+      };
+
+      const result = await service.search('cached question');
+
+      expect(result).toEqual({
+        answer: '',
+        sources,
+        confidence: 0.8,
+        processingTime: 12,
+      });
+      expect(ChatOpenAIMock).not.toHaveBeenCalled();
     });
   });
 

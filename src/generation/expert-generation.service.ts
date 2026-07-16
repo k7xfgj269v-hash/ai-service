@@ -2,38 +2,31 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOpenAI } from '@langchain/openai';
 
+type ExpertProfile = {
+  apiKey: string;
+  baseURL?: string;
+  modelName: string;
+};
+
 @Injectable()
 export class ExpertGenerationService {
   private readonly logger = new Logger(ExpertGenerationService.name);
   private readonly model: ChatOpenAI | null;
 
   constructor(private readonly configService: ConfigService) {
-    const apiKey = this.resolveString(
-      'EXPERT_API_KEY',
-      'QWEN_API_KEY',
-      'DEEPSEEK_API_KEY',
-    );
-
-    if (!apiKey) {
+    const profile = this.resolveProfile();
+    if (!profile) {
       this.model = null;
       this.logger.error('Expert API key is not configured');
       return;
     }
 
-    const baseURL = this.resolveString(
-      'EXPERT_API_BASE_URL',
-      'QWEN_API_BASE_URL',
-      'OPENAI_API_BASE_URL',
-    );
-    const modelName =
-      this.resolveString('EXPERT_MODEL', 'QWEN_MODEL', 'AI_MODEL') || 'qwen-plus';
-
     this.model = new ChatOpenAI({
-      apiKey,
-      modelName,
+      apiKey: profile.apiKey,
+      modelName: profile.modelName,
       temperature: this.resolveNumber('EXPERT_TEMPERATURE', 0.2),
       maxTokens: this.resolveNumber('EXPERT_MAX_TOKENS', 8192),
-      configuration: baseURL ? { baseURL } : undefined,
+      configuration: profile.baseURL ? { baseURL: profile.baseURL } : undefined,
     });
   }
 
@@ -63,12 +56,44 @@ export class ExpertGenerationService {
     return String(response.content ?? '');
   }
 
-  private resolveString(...keys: string[]): string | undefined {
-    for (const key of keys) {
-      const value = this.configService.get<string>(key);
-      if (typeof value === 'string' && value.trim()) {
-        return value.trim();
-      }
+  private resolveProfile(): ExpertProfile | null {
+    const canonicalApiKey = this.resolveString('EXPERT_API_KEY');
+    if (canonicalApiKey) {
+      return {
+        apiKey: canonicalApiKey,
+        baseURL: this.resolveString('EXPERT_API_BASE_URL'),
+        modelName: this.resolveString('EXPERT_MODEL') || 'qwen-plus',
+      };
+    }
+
+    const qwenApiKey = this.resolveString('QWEN_API_KEY');
+    if (qwenApiKey) {
+      return {
+        apiKey: qwenApiKey,
+        baseURL:
+          this.resolveString('QWEN_API_BASE_URL') ||
+          'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        modelName: this.resolveString('QWEN_MODEL') || 'qwen-plus',
+      };
+    }
+
+    const deepSeekApiKey = this.resolveString('DEEPSEEK_API_KEY');
+    if (deepSeekApiKey) {
+      return {
+        apiKey: deepSeekApiKey,
+        baseURL:
+          this.resolveString('OPENAI_API_BASE_URL') || 'https://api.deepseek.com',
+        modelName: this.resolveString('AI_MODEL') || 'deepseek-chat',
+      };
+    }
+
+    return null;
+  }
+
+  private resolveString(key: string): string | undefined {
+    const value = this.configService.get<string>(key);
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
     }
     return undefined;
   }

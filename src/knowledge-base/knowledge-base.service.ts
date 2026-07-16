@@ -7,10 +7,6 @@ import { DocxLoader } from '@langchain/community/document_loaders/fs/docx';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { FaissStore } from '@langchain/community/vectorstores/faiss';
-import { ChatOpenAI } from '@langchain/openai';
-import { PromptTemplate } from '@langchain/core/prompts';
-import { StringOutputParser } from '@langchain/core/output_parsers';
-import { RunnableSequence } from '@langchain/core/runnables';
 import { Document } from '@langchain/core/documents';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -182,28 +178,6 @@ export class KnowledgeBaseService {
   }
 
   /**
-   * Get chat model instance
-   */
-  private getChatModel(config?: KnowledgeBaseConfig): ChatOpenAI {
-    const apiKey =
-      this.configService.get<string>('QWEN_API_KEY') ||
-      config?.openai_api_key ||
-      this.configService.get<string>('DEEPSEEK_API_KEY');
-    const baseURL =
-      this.configService.get<string>('QWEN_API_BASE_URL') ||
-      config?.openai_api_base_url ||
-      this.configService.get<string>('OPENAI_API_BASE_URL');
-    const modelName =
-      config?.model || this.configService.get<string>('QWEN_MODEL') || 'qwen-plus';
-
-    return new ChatOpenAI({
-      modelName,
-      temperature: config?.temperature || 0.7,
-      configuration: { apiKey, baseURL },
-    });
-  }
-
-  /**
    * Load existing vector store
    */
   private async loadVectorStore(config?: KnowledgeBaseConfig): Promise<void> {
@@ -341,7 +315,7 @@ export class KnowledgeBaseService {
   }
 
   /**
-   * Search knowledge base with RAG (Redis-cached)
+   * Search knowledge base for retrieval evidence (Redis-cached)
    */
   async search(
     question: string,
@@ -363,7 +337,7 @@ export class KnowledgeBaseService {
         const cached = await this.redis.get(cacheKey);
         if (cached) {
           this.logger.log(`搜索结果命中缓存: ${cacheKey.slice(0, 30)}...`);
-          return JSON.parse(cached) as SearchResult;
+          return { ...(JSON.parse(cached) as SearchResult), answer: '' };
         }
       } catch (cacheErr) {
         this.logger.warn('Redis 缓存读取失败，继续正常搜索:', cacheErr.message);
@@ -391,11 +365,10 @@ export class KnowledgeBaseService {
       });
       this.logger.log(`Selected ${selected.length}/${scored.length} after filtering & relevance gate`);
 
-      // 命中为空：直接返回，不再浪费一次 LLM 调用去基于空上下文编造
       if (selected.length === 0) {
         const processingTime = Date.now() - startTime;
         const empty: SearchResult = {
-          answer: '抱歉，知识库中没有找到与您问题相关的信息。',
+          answer: '',
           sources: [],
           confidence: 0,
           processingTime,
@@ -403,37 +376,12 @@ export class KnowledgeBaseService {
         return empty;
       }
 
-      const context = selected
-        .map((doc, index) => `[Document ${index + 1}]\n${doc.content}`)
-        .join('\n\n');
-
-      const promptTemplate = PromptTemplate.fromTemplate(`
-You are a professional knowledge base assistant. Answer the user's question based on the provided document content.
-
-Document Content:
-{context}
-
-User Question: {question}
-
-Please provide an accurate and detailed answer based on the above document content. If the documents don't contain relevant information, clearly state that.
-
-Requirements:
-1. Answer should be comprehensive and well-structured
-2. Cite specific information from the documents
-3. If uncertain, acknowledge the limitations
-4. Use clear and professional language
-`);
-
-      const model = this.getChatModel(config);
-      const chain = RunnableSequence.from([promptTemplate, model, new StringOutputParser()]);
-      const answer = await chain.invoke({ context, question });
-
       const processingTime = Date.now() - startTime;
       // 用最相似命中的真实距离换算 confidence，而非旧的"文档数×长度"假信号
       const confidence = KnowledgeBaseService.confidenceFromDistance(selected[0].score);
 
       const result: SearchResult = {
-        answer,
+        answer: '',
         sources: selected,
         confidence,
         processingTime,

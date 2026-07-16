@@ -46,11 +46,29 @@ describe('ExpertGenerationService', () => {
     });
   });
 
-  it('resolves legacy variables into one immutable Qwen-first profile', () => {
+  it('does not fill a canonical profile from legacy provider variables', () => {
+    const service = createService({
+      EXPERT_API_KEY: 'expert-key',
+      QWEN_API_BASE_URL: 'https://qwen.example/v1',
+      QWEN_MODEL: 'qwen-custom',
+      OPENAI_API_BASE_URL: 'https://deepseek.example/v1',
+      AI_MODEL: 'deepseek-custom',
+    });
+
+    expect(service.isAvailable()).toBe(true);
+    expect(ChatOpenAIMock).toHaveBeenCalledTimes(1);
+    expect(ChatOpenAIMock).toHaveBeenCalledWith({
+      apiKey: 'expert-key',
+      modelName: 'qwen-plus',
+      temperature: 0.2,
+      maxTokens: 8192,
+      configuration: undefined,
+    });
+  });
+
+  it('selects the Qwen profile atomically with Qwen defaults', () => {
     const service = createService({
       QWEN_API_KEY: 'qwen-key',
-      QWEN_API_BASE_URL: 'https://qwen.example/v1',
-      QWEN_MODEL: 'qwen-plus',
       DEEPSEEK_API_KEY: 'deepseek-key',
       OPENAI_API_BASE_URL: 'https://deepseek.example/v1',
       AI_MODEL: 'deepseek-chat',
@@ -63,7 +81,27 @@ describe('ExpertGenerationService', () => {
       modelName: 'qwen-plus',
       temperature: 0.2,
       maxTokens: 8192,
-      configuration: { baseURL: 'https://qwen.example/v1' },
+      configuration: {
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    });
+  });
+
+  it('selects the DeepSeek profile atomically with DeepSeek defaults', () => {
+    const service = createService({
+      QWEN_API_BASE_URL: 'https://qwen.example/v1',
+      QWEN_MODEL: 'qwen-custom',
+      DEEPSEEK_API_KEY: 'deepseek-key',
+    });
+
+    expect(service.isAvailable()).toBe(true);
+    expect(ChatOpenAIMock).toHaveBeenCalledTimes(1);
+    expect(ChatOpenAIMock).toHaveBeenCalledWith({
+      apiKey: 'deepseek-key',
+      modelName: 'deepseek-chat',
+      temperature: 0.2,
+      maxTokens: 8192,
+      configuration: { baseURL: 'https://api.deepseek.com' },
     });
   });
 
