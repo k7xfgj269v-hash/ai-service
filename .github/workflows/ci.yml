@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  NODE_VERSION: "22"
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential cmake libopenblas-dev
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke test native dependencies
+        run: node scripts/native-smoke.js
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run focused operations tests
+        run: npm test -- --runTestsByPath src/health/health.service.spec.ts src/rag/evaluation/rag-evaluator.spec.ts
+
+      - name: Run full tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Run deterministic offline RAG evaluation
+        run: npm run eval:rag
+
+      - name: Run application e2e tests
+        run: npm run test:e2e
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  container:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --tag ai-service:ci .
