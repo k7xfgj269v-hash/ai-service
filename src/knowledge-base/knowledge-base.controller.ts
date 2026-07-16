@@ -1,33 +1,117 @@
 import {
+  BadRequestException,
   Body,
+  CallHandler,
   Controller,
-  Get,
-  Post,
   Delete,
+  ExecutionContext,
+  Get,
+  Injectable,
+  NestInterceptor,
+  Post,
+  Query,
   UploadedFile,
   UseInterceptors,
-  Query,
-  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { MulterOptions } from '@nestjs/platform-express/multer/interfaces/multer-options.interface';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { KnowledgeBaseService } from './knowledge-base.service';
-import {
-  AddDocumentDto,
-  SearchKnowledgeBaseDto,
-  ListDocumentsDto,
-  RemoveDocumentDto,
-  RebuildKnowledgeBaseDto,
-  AddDocumentResponseDto,
-  SearchResponseDto,
-  KnowledgeBaseStatsDto,
-  DocumentMetadataDto,
-  RemoveDocumentResponseDto,
-  RebuildResponseDto,
-} from './knowledge-base.dto';
+import * as fs from 'fs';
 import { diskStorage } from 'multer';
 import * as path from 'path';
-import * as fs from 'fs';
+import { Observable, catchError, throwError } from 'rxjs';
+import {
+  AddDocumentDto,
+  AddDocumentResponseDto,
+  DocumentMetadataDto,
+  KnowledgeBaseStatsDto,
+  ListDocumentsDto,
+  RemoveDocumentDto,
+  RemoveDocumentResponseDto,
+  RebuildResponseDto,
+  RetrieveKnowledgeBaseDto,
+  RetrieveResponseDto,
+  SearchKnowledgeBaseDto,
+  SearchResponseDto,
+} from './knowledge-base.dto';
+import { KnowledgeBaseService } from './knowledge-base.service';
+
+export const DOCUMENT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+
+const DOCUMENT_MIME_TYPES: Readonly<Record<string, readonly string[]>> = {
+  '.pdf': ['application/pdf', 'application/octet-stream'],
+  '.docx': [
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/zip',
+    'application/octet-stream',
+  ],
+  '.md': [
+    'text/markdown',
+    'text/x-markdown',
+    'text/plain',
+    'application/octet-stream',
+  ],
+  '.txt': ['text/plain', 'application/octet-stream'],
+};
+
+function cleanupUploadedFile(filePath?: string): void {
+  if (!filePath) return;
+  try {
+    fs.unlinkSync(filePath);
+  } catch {}
+}
+
+export const documentUploadOptions: MulterOptions = {
+  limits: { fileSize: DOCUMENT_UPLOAD_MAX_BYTES },
+  fileFilter: (_request, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    const allowedMimeTypes = DOCUMENT_MIME_TYPES[extension];
+    const mimeType = String(file.mimetype || '').toLowerCase();
+
+    if (!allowedMimeTypes || !allowedMimeTypes.includes(mimeType)) {
+      callback(
+        new BadRequestException(
+          'Only PDF, DOCX, Markdown, and text files are supported',
+        ),
+        false,
+      );
+      return;
+    }
+
+    callback(null, true);
+  },
+  storage: diskStorage({
+    destination: (_request, _file, callback) => {
+      const uploadPath = path.join(process.cwd(), 'uploads', 'documents');
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      callback(null, uploadPath);
+    },
+    filename: (_request, file, callback) => {
+      const uniqueSuffix =
+        Date.now() + '-' + Math.round(Math.random() * 1e9);
+      const extension = path.extname(file.originalname);
+      callback(null, `${file.fieldname}-${uniqueSuffix}${extension}`);
+    },
+  }),
+};
+
+@Injectable()
+export class FailedUploadCleanupInterceptor implements NestInterceptor {
+  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    const request = context.switchToHttp().getRequest<{
+      file?: Express.Multer.File;
+    }>();
+
+    return next.handle().pipe(
+      catchError(error => {
+        cleanupUploadedFile(request.file?.path);
+        return throwError(() => error);
+      }),
+    );
+  }
+}
 
 @ApiTags('knowledge-base')
 @Controller('knowledge-base')
@@ -44,65 +128,37 @@ export class KnowledgeBaseController {
     type: AddDocumentResponseDto,
   })
   @UseInterceptors(
-    FileInterceptor('file', {
-      // Reject unsupported types before they touch disk, and cap the size so a
-      // large or bogus upload can't exhaust disk / memory. Only the extensions
-      // loadDocument() actually handles are accepted.
-      limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
-      fileFilter: (req, file, cb) => {
-        const allowed = ['.pdf', '.txt', '.md', '.docx'];
-        const ext = path.extname(file.originalname).toLowerCase();
-        if (!allowed.includes(ext)) {
-          return cb(
-            new BadRequestException(`Unsupported file type: ${ext || '(none)'}. Allowed: ${allowed.join(', ')}`),
-            false,
-          );
-        }
-        cb(null, true);
-      },
-      storage: diskStorage({
-        destination: (req, file, cb) => {
-          const uploadPath = path.join(process.cwd(), 'uploads', 'documents');
-          if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath, { recursive: true });
-          }
-          cb(null, uploadPath);
-        },
-        filename: (req, file, cb) => {
-          const uniqueSuffix =
-            Date.now() + '-' + Math.round(Math.random() * 1e9);
-          const ext = path.extname(file.originalname);
-          cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
-        },
-      }),
-    }),
+    FileInterceptor('file', documentUploadOptions),
+    FailedUploadCleanupInterceptor,
   )
   async addDocument(
     @UploadedFile() file: Express.Multer.File,
     @Body() body: AddDocumentDto,
   ): Promise<AddDocumentResponseDto> {
     if (!file) {
-      throw new BadRequestException('No file uploaded (field name must be "file")');
+      throw new BadRequestException(
+        'No file uploaded (field name must be "file")',
+      );
     }
-    return await this.knowledgeBaseService.addDocument(
-      file.path,
-      file.originalname,
-      file.mimetype,
-      {
-        openai_api_key: body.openai_api_key,
-        openai_api_base_url: body.openai_api_base_url,
-        model: body.model,
-        temperature: body.temperature,
-        chunkSize: body.chunkSize,
-        chunkOverlap: body.chunkOverlap,
-        tags: body.tags,
-        category: body.category,
-      },
-    );
+
+    try {
+      return await this.knowledgeBaseService.addDocument(
+        file.path,
+        file.originalname,
+        file.mimetype,
+        {
+          tags: body.tags,
+          category: body.category,
+        },
+      );
+    } catch (error) {
+      cleanupUploadedFile(file.path);
+      throw error;
+    }
   }
 
   @Post('search')
-  @ApiOperation({ summary: 'Search knowledge base with RAG' })
+  @ApiOperation({ summary: 'Search knowledge base with legacy response shape' })
   @ApiResponse({
     status: 200,
     description: 'Search completed successfully',
@@ -113,15 +169,36 @@ export class KnowledgeBaseController {
   ): Promise<SearchResponseDto> {
     return await this.knowledgeBaseService.search(body.question, {
       topK: body.topK,
-      openai_api_key: body.openai_api_key,
-      openai_api_base_url: body.openai_api_base_url,
-      model: body.model,
-      temperature: body.temperature,
       filter: {
         category: body.filterCategory,
         tags: body.filterTags,
       },
     });
+  }
+
+  @Post('retrieve')
+  @ApiOperation({ summary: 'Retrieve ranked knowledge base evidence' })
+  @ApiResponse({
+    status: 200,
+    description: 'Evidence retrieved successfully',
+    type: RetrieveResponseDto,
+  })
+  async retrieve(
+    @Body() body: RetrieveKnowledgeBaseDto,
+  ): Promise<RetrieveResponseDto> {
+    const result = await this.knowledgeBaseService.search(body.query, {
+      topK: body.topK,
+      filter: {
+        category: body.filterCategory,
+        tags: body.filterTags,
+      },
+    });
+
+    return {
+      sources: result.sources,
+      confidence: result.confidence,
+      processingTime: result.processingTime,
+    };
   }
 
   @Get('stats')
@@ -143,13 +220,8 @@ export class KnowledgeBaseController {
     type: [DocumentMetadataDto],
   })
   async listDocuments(
-    @Query('category') category?: string,
-    @Query('tags') tags?: string,
+    @Query() filter: ListDocumentsDto,
   ): Promise<DocumentMetadataDto[]> {
-    const filter: ListDocumentsDto = {};
-    if (category) filter.category = category;
-    if (tags) filter.tags = tags.split(',');
-
     return await this.knowledgeBaseService.listDocuments(filter);
   }
 
@@ -183,16 +255,17 @@ export class KnowledgeBaseController {
     description: 'Knowledge base rebuilt successfully',
     type: RebuildResponseDto,
   })
-  async rebuild(
-    @Body() body: RebuildKnowledgeBaseDto,
-  ): Promise<RebuildResponseDto> {
-    return await this.knowledgeBaseService.rebuild({
-      openai_api_key: body.openai_api_key,
-      openai_api_base_url: body.openai_api_base_url,
-      model: body.model,
-      temperature: body.temperature,
-      chunkSize: body.chunkSize,
-      chunkOverlap: body.chunkOverlap,
-    });
+  async rebuild(@Body() body?: unknown): Promise<RebuildResponseDto> {
+    if (
+      body !== undefined &&
+      (body === null ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        Object.keys(body).length > 0)
+    ) {
+      throw new BadRequestException('Rebuild request body must be empty');
+    }
+
+    return await this.knowledgeBaseService.rebuild();
   }
 }
