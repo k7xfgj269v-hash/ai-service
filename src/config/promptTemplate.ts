@@ -1,5 +1,5 @@
 export const PromptTemplates: Record<string, string> = {
-  hrExpertRAG: `你是一位有15年下沉市场人力资源经验的招聘专家。
+  expertRAG: `你是一位有15年下沉市场人力资源经验的招聘专家。
 
 ## 知识库参考
 {context}
