@@ -8,12 +8,16 @@ import { WorkWeixinModule } from "./work-weixin/work-weixin.module";
 import { KnowledgeBaseModule } from "./knowledge-base/knowledge-base.module";
 import { AiServiceModule } from "./ai-service/ai.module";
 import { ChatModule } from "./chat/chat.module";
+import { validateEnvironment } from "./config/env.validation";
+import { SecurityModule } from "./common/security/security.module";
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ".env",
+      cache: true,
+      validate: validateEnvironment,
     }),
     ThrottlerModule.forRoot([{
       ttl: 60000,   // 1分钟窗口（毫秒）
@@ -27,6 +31,7 @@ import { ChatModule } from "./chat/chat.module";
     KnowledgeBaseModule,
     AiServiceModule,
     ChatModule,
+    SecurityModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
