@@ -10,6 +10,7 @@ import { AiServiceModule } from "./ai-service/ai.module";
 import { ChatModule } from "./chat/chat.module";
 import { validateEnvironment } from "./config/env.validation";
 import { SecurityModule } from "./common/security/security.module";
+import { HealthModule } from "./health/health.module";
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { SecurityModule } from "./common/security/security.module";
     AiServiceModule,
     ChatModule,
     SecurityModule,
+    HealthModule.registerCore(),
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

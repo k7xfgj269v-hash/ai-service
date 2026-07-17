@@ -1,164 +1,188 @@
-import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { Document } from '@langchain/core/documents';
-import { ChatOpenAI } from '@langchain/openai';
+import { RagIndexerService } from '../rag/indexing/rag-indexer.service';
+import { RagQueryService } from '../rag/rag-query.service';
+import { RagRepository } from '../rag/storage/rag.repository';
 import { KnowledgeBaseService } from './knowledge-base.service';
 
-jest.mock('@langchain/openai', () => ({
-  OpenAIEmbeddings: jest.fn(),
-  ChatOpenAI: jest.fn(),
-}));
+function doc(
+  documentId: string,
+  extra: Record<string, any> = {},
+): Document {
+  return new Document({
+    pageContent: `content-${documentId}`,
+    metadata: { documentId, ...extra },
+  });
+}
 
-jest.mock('ioredis', () =>
-  jest.fn().mockImplementation(() => ({
-    on: jest.fn(),
-    get: jest.fn(async () => null),
-    setex: jest.fn(async () => 'OK'),
-    disconnect: jest.fn(),
-  })),
-);
-
-function doc(documentId: string, extra: Record<string, any> = {}): Document {
-  return new Document({ pageContent: `content-${documentId}`, metadata: { documentId, ...extra } });
+function emptyAnswer(query: string) {
+  return {
+    query,
+    activeGeneration: null,
+    evidence: [],
+    context: '',
+    estimatedTokens: 0,
+    degraded: false,
+    failedRetrievers: [],
+    rerankerStatus: 'disabled',
+    cache: {
+      retrieval: 'disabled',
+      context: 'disabled',
+      version: 'test',
+    },
+    timings: {
+      cacheMs: 0,
+      retrievalMs: 0,
+      contextMs: 0,
+      generationMs: 0,
+      totalMs: 5,
+    },
+    answer: '',
+    citations: [],
+    abstained: true,
+    abstentionReasons: ['weak-evidence'],
+  };
 }
 
 describe('KnowledgeBaseService', () => {
   let service: KnowledgeBaseService;
-  const ChatOpenAIMock = ChatOpenAI as unknown as jest.Mock;
-
-  const mockConfigService = {
-    get: jest.fn((key: string, defaultVal?: any) => {
-      const config: Record<string, string> = {
-        DEEPSEEK_API_KEY: 'test_key',
-        OPENAI_API_BASE_URL: 'https://api.deepseek.com',
-        EMBEDDING_API_KEY: 'test_embedding_key',
-        EMBEDDING_API_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        EMBEDDING_MODEL: 'text-embedding-v3',
-        QWEN_API_KEY: 'test_qwen_key',
-        QWEN_API_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        QWEN_MODEL: 'qwen-plus',
-        REDIS_URL: 'redis://localhost:6379',
-      };
-      return config[key] ?? defaultVal;
-    }),
+  let indexer: {
+    ingest: jest.Mock;
+    rebuild: jest.Mock;
+  };
+  let repository: {
+    listDocuments: jest.Mock;
+    getDocumentVersion: jest.Mock;
+    getActiveGeneration: jest.Mock;
+    deactivateDocument: jest.Mock;
+    clearCorpus: jest.Mock;
+  };
+  let ragQuery: {
+    retrieve: jest.Mock;
+    answer: jest.Mock;
   };
 
-  beforeEach(async () => {
-    ChatOpenAIMock.mockClear();
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        KnowledgeBaseService,
-        { provide: ConfigService, useValue: mockConfigService },
-      ],
-    }).compile();
-
-    service = module.get<KnowledgeBaseService>(KnowledgeBaseService);
+  beforeEach(() => {
+    indexer = {
+      ingest: jest.fn(),
+      rebuild: jest.fn(),
+    };
+    repository = {
+      listDocuments: jest.fn(() => []),
+      getDocumentVersion: jest.fn(),
+      getActiveGeneration: jest.fn(() => null),
+      deactivateDocument: jest.fn(),
+      clearCorpus: jest.fn(),
+    };
+    ragQuery = {
+      retrieve: jest.fn(),
+      answer: jest.fn(async request => emptyAnswer(request.query)),
+    };
+    const configService = {
+      get: jest.fn((key: string) =>
+        key === 'EMBEDDING_MODEL' ? 'text-embedding-v3' : undefined,
+      ),
+    };
+    service = new KnowledgeBaseService(
+      indexer as unknown as RagIndexerService,
+      repository as unknown as RagRepository,
+      ragQuery as unknown as RagQueryService,
+      configService as unknown as ConfigService,
+    );
   });
 
-  afterEach(() => {
-    (service as any).redis?.disconnect?.();
-    (service as any).db?.close?.();
-  });
-
-  it('should be defined', () => {
+  it('is defined', () => {
     expect(service).toBeDefined();
   });
 
-  describe('getStats()', () => {
-    it('should return stats with defaults when knowledge base is empty', async () => {
-      const stats = await service.getStats();
-      expect(stats).toBeDefined();
-      expect(typeof stats.totalDocuments).toBe('number');
-      expect(typeof stats.totalChunks).toBe('number');
-      expect(Array.isArray(stats.categories)).toBe(true);
+  it('returns empty repository statistics', async () => {
+    await expect(service.getStats()).resolves.toEqual({
+      totalDocuments: 0,
+      totalChunks: 0,
+      categories: [],
+      lastUpdated: 'Never',
+      vectorStorePath: '',
     });
   });
 
-  describe('search()', () => {
-    it('should return empty result when vector store is not initialized', async () => {
-      const result = await service.search('test query');
-      expect(result).toBeDefined();
-      expect(result.answer).toBe('');
-      expect(result.sources).toEqual([]);
-      expect(result.confidence).toBe(0);
+  it('returns an empty legacy search shape when RAG abstains without evidence', async () => {
+    await expect(service.search('test query')).resolves.toEqual({
+      answer: '',
+      sources: [],
+      confidence: 0,
+      processingTime: 5,
     });
+    expect(ragQuery.answer).toHaveBeenCalledWith({
+      query: 'test query',
+      limit: undefined,
+      filter: undefined,
+    });
+  });
 
-    it('returns retrieval evidence without creating a second answer generator', async () => {
-      const vectorStore = {
-        similaritySearchWithScore: jest.fn(async () => [
-          [doc('a', { fileName: 'policy.md' }), 0.2],
-        ]),
-      };
-      const redis = {
-        get: jest.fn(async () => null),
-        setex: jest.fn(async (_key: string, _ttl: number, _value: string) => 'OK'),
-      };
-      const db = {
-        prepare: jest.fn((sql: string) => {
-          if (sql.includes('SUM(chunkCount)')) {
-            return { get: () => ({ total: 1 }) };
-          }
-          if (sql.includes('SELECT id FROM documents')) {
-            return { all: () => [{ id: 'a' }] };
-          }
-          throw new Error(`unexpected SQL: ${sql}`);
-        }),
-      };
-      (service as any).vectorStore = vectorStore;
-      (service as any).redis = redis;
-      (service as any).db.close();
-      (service as any).db = db;
-
-      const result = await service.search('policy question', { topK: 1 });
-
-      expect(result.answer).toBe('');
-      expect(result.sources).toEqual([
+  it('maps one RAG answer into the legacy search response with one generation call', async () => {
+    ragQuery.answer.mockResolvedValue({
+      ...emptyAnswer('policy question'),
+      answer: 'Use the current policy.',
+      abstained: false,
+      abstentionReasons: [],
+      evidence: [
         {
-          content: 'content-a',
-          metadata: {
-            documentId: 'a',
-            fileName: 'policy.md',
-          },
-          score: 0.2,
+          sourceId: 'source-1',
+          parentId: 'parent-1',
+          documentId: 'doc-1',
+          versionId: 'version-1',
+          documentName: 'policy.md',
+          mimeType: 'text/markdown',
+          sourceIdentity: 'document:policy.md',
+          headingPath: ['Leave'],
+          category: 'hr',
+          tags: ['leave'],
+          documentUpdatedAt: '2026-07-17T00:00:00.000Z',
+          content: 'Policy evidence',
+          confidence: 0.8,
+          metadata: { section: 'leave' },
         },
-      ]);
-      expect(result.confidence).toBeCloseTo(1 / 1.2);
-      expect(ChatOpenAIMock).not.toHaveBeenCalled();
-      expect(redis.setex).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(redis.setex.mock.calls[0][2]).answer).toBe('');
+      ],
     });
 
-    it('strips answers from legacy cached retrieval results', async () => {
-      const sources = [{ content: 'cached evidence', metadata: { documentId: 'a' }, score: 0.2 }];
-      (service as any).vectorStore = {};
-      (service as any).redis = {
-        get: jest.fn(async () =>
-          JSON.stringify({
-            answer: 'legacy generated answer',
-            sources,
-            confidence: 0.8,
-            processingTime: 12,
-          }),
-        ),
-      };
+    const result = await service.search('policy question', {
+      topK: 1,
+      filter: { category: 'hr' },
+    });
 
-      const result = await service.search('cached question');
-
-      expect(result).toEqual({
-        answer: '',
-        sources,
-        confidence: 0.8,
-        processingTime: 12,
-      });
-      expect(ChatOpenAIMock).not.toHaveBeenCalled();
+    expect(result.answer).toBe('Use the current policy.');
+    expect(result.confidence).toBe(0.8);
+    expect(result.sources).toEqual([
+      {
+        content: 'Policy evidence',
+        metadata: {
+          section: 'leave',
+          sourceId: 'source-1',
+          parentId: 'parent-1',
+          documentId: 'doc-1',
+          versionId: 'version-1',
+          fileName: 'policy.md',
+          fileType: 'text/markdown',
+          sourceIdentity: 'document:policy.md',
+          headingPath: ['Leave'],
+          category: 'hr',
+          tags: ['leave'],
+          updatedAt: '2026-07-17T00:00:00.000Z',
+        },
+        score: 0.8,
+      },
+    ]);
+    expect(ragQuery.answer).toHaveBeenCalledTimes(1);
+    expect(ragQuery.answer).toHaveBeenCalledWith({
+      query: 'policy question',
+      limit: 1,
+      filter: { category: 'hr' },
     });
   });
 
-  describe('listDocuments()', () => {
-    it('should return empty array when no documents exist', async () => {
-      const docs = await service.listDocuments();
-      expect(Array.isArray(docs)).toBe(true);
-    });
+  it('returns documents from the authoritative repository', async () => {
+    await expect(service.listDocuments()).resolves.toEqual([]);
+    expect(repository.listDocuments).toHaveBeenCalledWith({});
   });
 
   describe('selectRelevantDocs()', () => {
@@ -169,25 +193,28 @@ describe('KnowledgeBaseService', () => {
         [doc('deleted'), 0.1],
         [doc('a'), 0.2],
       ];
-      const out = KnowledgeBaseService.selectRelevantDocs(scored, { topK: 5, liveDocIds: live });
-      expect(out.map(d => d.metadata.documentId)).toEqual(['a']);
+      const out = KnowledgeBaseService.selectRelevantDocs(scored, {
+        topK: 5,
+        liveDocIds: live,
+      });
+      expect(out.map(item => item.metadata.documentId)).toEqual(['a']);
     });
 
-    it('always keeps the closest hit and drops far-away noise via the relative gate', () => {
+    it('keeps close hits and drops far-away noise', () => {
       const scored: Array<[Document, number]> = [
         [doc('a'), 0.2],
         [doc('b'), 0.25],
-        [doc('c'), 5.0], // way past 0.2 * 1.5
+        [doc('c'), 5],
       ];
       const out = KnowledgeBaseService.selectRelevantDocs(scored, {
         topK: 5,
         liveDocIds: live,
         maxRelativeDistance: 1.5,
       });
-      expect(out.map(d => d.metadata.documentId)).toEqual(['a', 'b']);
+      expect(out.map(item => item.metadata.documentId)).toEqual(['a', 'b']);
     });
 
-    it('over-fetch + category filter still yields matches (no starvation)', () => {
+    it('applies metadata filters before topK', () => {
       const scored: Array<[Document, number]> = [
         [doc('a', { category: 'other' }), 0.1],
         [doc('b', { category: 'hr' }), 0.15],
@@ -198,13 +225,16 @@ describe('KnowledgeBaseService', () => {
         liveDocIds: live,
         filter: { category: 'hr' },
       });
-      expect(out.map(d => d.metadata.documentId)).toEqual(['b', 'c']);
+      expect(out.map(item => item.metadata.documentId)).toEqual(['b', 'c']);
     });
 
-    it('returns [] when everything is filtered out', () => {
-      const scored: Array<[Document, number]> = [[doc('deleted'), 0.1]];
-      const out = KnowledgeBaseService.selectRelevantDocs(scored, { topK: 5, liveDocIds: live });
-      expect(out).toEqual([]);
+    it('returns no result when all candidates are filtered out', () => {
+      expect(
+        KnowledgeBaseService.selectRelevantDocs([[doc('deleted'), 0.1]], {
+          topK: 5,
+          liveDocIds: live,
+        }),
+      ).toEqual([]);
     });
 
     it('respects topK after filtering', () => {
@@ -213,21 +243,25 @@ describe('KnowledgeBaseService', () => {
         [doc('b'), 0.11],
         [doc('c'), 0.12],
       ];
-      const out = KnowledgeBaseService.selectRelevantDocs(scored, { topK: 2, liveDocIds: live });
-      expect(out).toHaveLength(2);
+      expect(
+        KnowledgeBaseService.selectRelevantDocs(scored, {
+          topK: 2,
+          liveDocIds: live,
+        }),
+      ).toHaveLength(2);
     });
   });
 
   describe('confidenceFromDistance()', () => {
-    it('is 1 at distance 0 and decreases monotonically', () => {
+    it('is bounded and monotonically decreasing', () => {
       expect(KnowledgeBaseService.confidenceFromDistance(0)).toBe(1);
       expect(KnowledgeBaseService.confidenceFromDistance(1)).toBeCloseTo(0.5);
-      expect(KnowledgeBaseService.confidenceFromDistance(0.2)).toBeGreaterThan(
-        KnowledgeBaseService.confidenceFromDistance(2),
-      );
+      expect(
+        KnowledgeBaseService.confidenceFromDistance(0.2),
+      ).toBeGreaterThan(KnowledgeBaseService.confidenceFromDistance(2));
     });
 
-    it('returns 0 for invalid input', () => {
+    it('returns zero for invalid input', () => {
       expect(KnowledgeBaseService.confidenceFromDistance(NaN)).toBe(0);
       expect(KnowledgeBaseService.confidenceFromDistance(-1)).toBe(0);
     });

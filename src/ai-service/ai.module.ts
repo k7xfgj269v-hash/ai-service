@@ -69,6 +69,6 @@ class ConversationRedisClient implements OnModuleInit, OnModuleDestroy {
     },
     AiService,
   ],
-  exports: [AiService],
+  exports: [AiService, CONVERSATION_REDIS],
 })
 export class AiServiceModule {}
