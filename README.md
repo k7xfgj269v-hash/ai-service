@@ -1,52 +1,44 @@
 # ai-service
 
-企业微信 AI 客服核心服务。系统只保留一个 Expert 回答模型，并使用
-FAISS + SQLite FTS5 混合检索、RRF 融合、父子分块、证据闸门和引用校验
-组成完整 RAG 链路。
+**WeChat Work AI customer-service core — single-Expert hybrid RAG with FAISS + SQLite FTS5.**
 
-## 核心能力
+NestJS backend that turns a knowledge base into an answer engine: documents are
+ingested into a hybrid FAISS (dense) + SQLite FTS5 (sparse) retrieval stack,
+fused with RRF and routed to a single Expert answer model through an evidence
+gate and citation validation. It plugs into WeChat Work (corporate app callbacks
+and zone callbacks), persists chat records, and ships a chat/admin web UI.
 
-- 单 Expert 回答链路，不存在 normal/expert 模式切换或第二个回答模型
-- 企业微信普通应用回调与专区回调
-- 回调时间戳校验、重放保护、Token 刷新和日志脱敏
-- 企业微信聊天记录持久化、幂等同步和无损并发 flush
-- PDF、DOCX、Markdown、TXT 文档上传和管理
-- FAISS 稠密检索与 SQLite FTS5 稀疏检索并行执行
-- RRF 融合、可选 reranker、父块展开、上下文预算和文档多样性控制
-- 弱证据拒答和引用 ID 校验
-- Redis 会话顺序锁、版本化检索缓存和原子索引 generation
-- 健康检查、离线 RAG 评测、GitHub Actions 和非 root Docker 镜像
+[中文版 README](README.zh-CN.md)
 
-## RAG 流程
+## Features
 
-```text
-文档 -> 结构化父子分块 -> SQLite 权威存储
-                         |-> FTS5 BM25
-                         |-> FAISS dense
+- Single Expert answer pipeline — no normal/expert mode switching or second model
+- WeChat Work corporate-app and zone callback handling
+- Callback timestamp validation, replay protection, token refresh, log redaction
+- Persistent, idempotent chat-record sync with lossless concurrent flush
+- PDF, DOCX, Markdown, and TXT document upload and management
+- Parallel FAISS dense + SQLite FTS5 sparse retrieval
+- RRF fusion, optional reranker, parent-block expansion, context budget, document diversity control
+- Weak-evidence refusal and citation-ID validation
+- Redis session order lock, versioned retrieval cache, atomic index generation
+- Health checks, offline RAG evaluation, GitHub Actions, non-root Docker image
 
-问题 -> dense + sparse -> RRF -> optional rerank
-     -> parent expansion -> context packing -> evidence gate
-     -> single Expert generation -> citation validation
-```
+## Quick Start
 
-SQLite 保存文档、版本、块、标签、索引 generation 和 tombstone。FAISS 与
-FTS5 是可重建索引；Redis 只保存会话、锁、重放记录和缓存。
+**Prerequisites**
 
-## 环境要求
-
-- Node.js 22
-- npm 10
+- Node.js 22, npm 10
 - Redis
-- 支持 FTS5/trigram 的 SQLite
-- FAISS 原生依赖
+- SQLite with FTS5/trigram support
+- FAISS native dependencies
 
-Linux 构建 FAISS 通常需要：
+On Linux, building FAISS usually needs:
 
 ```bash
 sudo apt-get install build-essential cmake libopenblas-dev
 ```
 
-## 快速开始
+**Install & run**
 
 ```bash
 npm ci
@@ -54,7 +46,7 @@ cp .env.example .env
 npm run start:dev
 ```
 
-至少配置：
+At minimum configure:
 
 ```bash
 REDIS_URL=redis://localhost:6379
@@ -66,10 +58,17 @@ EMBEDDING_API_BASE_URL=https://api.example.com/v1
 EMBEDDING_MODEL=text-embedding-v3
 ```
 
-生产环境还必须设置 `ADMIN_API_KEY`。不要把 `.env`、Token、API Key 或企业
-微信密钥提交到 Git。
+`ADMIN_API_KEY` is also required in production. Never commit `.env`, Tokens,
+API keys, or WeChat secrets to Git.
 
-## 常用命令
+For production:
+
+```bash
+npm run build
+npm run start:prod   # node dist/main.js
+```
+
+## Common Commands
 
 ```bash
 npm run typecheck
@@ -80,24 +79,47 @@ npm run eval:rag
 node scripts/native-smoke.js
 ```
 
-`npm run eval:rag` 使用 `evaluation/rag-eval.jsonl` 做确定性离线评测，不访问
-模型、Embedding、Redis 或网络。
+`npm run eval:rag` uses `evaluation/rag-eval.jsonl` for deterministic offline
+evaluation and does not call any model, embedding service, Redis, or the network.
 
-## Web 入口
+## Docker
 
-启动后打开 `/`。聊天界面包含知识库入口，可执行：
+```bash
+docker build -t ai-service .
+docker run --rm -p 3031:3031 \
+  --env-file .env \
+  -v ai-service-data:/app/data \
+  -v ai-service-uploads:/app/uploads \
+  ai-service
+```
 
-- 上传 PDF、DOCX、Markdown、TXT
-- 设置 category 和 tags
-- 查看文档及索引状态
-- 删除文档
-- 重建或清空知识库
+The runtime image runs as the non-root `node` user and uses `tini` for signals.
 
-管理操作通过 `x-admin-key` 鉴权；浏览器只在当前会话内保存操作员输入的 key。
+## Configuration
+
+Key environment variables (full list in [.env.example](.env.example)):
+
+| Variable | Description |
+| --- | --- |
+| `PORT` | HTTP port (default `3031`) |
+| `ADMIN_API_KEY` | Required in production; protects admin and destructive routes |
+| `REDIS_URL` | Redis connection string |
+| `EXPERT_API_KEY` / `EXPERT_API_BASE_URL` / `EXPERT_MODEL` | Single Expert answer model |
+| `EMBEDDING_API_KEY` / `EMBEDDING_API_BASE_URL` / `EMBEDDING_MODEL` | Retrieval embedding model |
+| `WORK_WEIXIN_*` | WeChat Work app and zone callback configuration |
+| `SWAGGER_ENABLED` | Enable Swagger (default off in production) |
+
+## Web UI
+
+Open `/` after startup. The chat view includes a knowledge-base console that can
+upload PDF/DOCX/Markdown/TXT, set category and tags, view document/index status,
+delete documents, and rebuild or clear the knowledge base. Admin actions are
+protected by the `x-admin-key` header; the browser keeps the operator key only
+for the current session.
 
 ## API
 
-公开接口：
+Public endpoints:
 
 ```text
 POST /chat
@@ -108,7 +130,7 @@ GET  /work-weixin/callback
 POST /work-weixin/callback
 ```
 
-RAG 与知识库管理接口：
+RAG and knowledge-base management:
 
 ```text
 POST   /knowledge-base/retrieve
@@ -122,65 +144,37 @@ DELETE /knowledge-base/clear
 POST   /knowledge-base/rebuild
 ```
 
-`/knowledge-base/retrieve` 只检索，不调用 Expert。`/knowledge-base/answer`
-返回回答、引用、拒答状态、活动 generation 和耗时。
+- `/knowledge-base/retrieve` only retrieves — it does not call the Expert model.
+- `/knowledge-base/answer` returns the answer, citations, refusal status, active generation, and latency.
+- Protected routes require `x-admin-key: <ADMIN_API_KEY>`.
+- Zone internal callbacks require `x-weixin-sync-token: <WORK_WEIXIN_SYNC_TOKEN>`.
 
-受保护接口需要：
-
-```text
-x-admin-key: <ADMIN_API_KEY>
-```
-
-专区内部回调需要：
-
-```text
-x-weixin-sync-token: <WORK_WEIXIN_SYNC_TOKEN>
-```
-
-生产环境默认关闭 Swagger。确需启用时设置 `SWAGGER_ENABLED=true` 并继续使用
-网关或网络层访问控制。
-
-## 健康检查
+Health checks:
 
 ```text
 GET /health/live
 GET /health/ready
 ```
 
-Liveness 不依赖外部模型。Readiness 检查配置、Redis、SQLite、FTS5、数据目录
-写权限和活动 FAISS generation；`/health/ready` 需要管理员鉴权。
+Liveness does not depend on external models. Readiness checks configuration,
+Redis, SQLite, FTS5, data-directory write access, and the active FAISS
+generation; `/health/ready` requires admin auth.
 
-## Docker
-
-```bash
-docker build -t ai-service .
-docker run --rm -p 3031:3031 \
-  --env-file .env \
-  -v ai-service-data:/app/data \
-  -v ai-service-uploads:/app/uploads \
-  ai-service
-```
-
-运行镜像使用非 root `node` 用户，并通过 `tini` 处理信号。
-
-## 主要目录
+## Project Structure
 
 ```text
-src/rag/                 RAG 存储、索引、检索、融合、上下文和评测
-src/knowledge-base/      文档管理与企业微信记录同步
-src/work-weixin/         企业微信协议、回调和主动消息
-src/generation/          唯一 Expert 回答客户端
-src/health/              liveness/readiness
-public/                  聊天与文档管理界面
-evaluation/              离线评测数据
+src/rag/                 RAG storage, indexing, retrieval, fusion, context, evaluation
+src/knowledge-base/      Document management & WeChat record sync
+src/work-weixin/         WeChat Work protocol, callbacks, proactive messages
+src/generation/          Single Expert answer client
+src/health/              liveness / readiness probes
+src/chat/                Chat endpoint
+src/common/security/     Admin & internal-callback guards
+public/                  Chat and document-management UI
+evaluation/              Offline evaluation data
 test/                    HTTP e2e
 ```
 
-## 安全边界
+## License
 
-- 外部请求不能指定上游 API key、provider URL 或模型
-- 管理、同步、主动发送和破坏性路由默认拒绝未鉴权访问
-- 上传限制为 25 MiB，并校验扩展名和 MIME 类型
-- 回调签名、时间戳和重放 ID 在触发 AI 或副作用前校验
-- 日志不输出 Token、API Key、完整消息或解密载荷
-- SQLite 查询使用参数绑定，文件名经过规范化
+MIT License — see [LICENSE](LICENSE).
